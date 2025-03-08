@@ -1,0 +1,624 @@
+# ----------------------描述统计----------------------
+library(dplyr)
+library(purrr)
+library(broom)
+
+# 假设数据框名为 imputed5，且包含分组变量 Group（FT-Group vs NFT-Group）
+imputed5$Fasciotomy <- factor(imputed5$Fasciotomy, levels = c(0, 1), labels = c("NFT-Group", "FT-Group"))
+continuous_vars <- c("Age", "BMI", "Prehospital_Time", "WBC", "NEU", "LYM", 
+                     "MON", "EOS", "BAS", "RBC", "HGB", "HCT", "PLT", "INR", 
+                     "PT", "APTT", "FIB", "TT", "D_dimer", "ATⅢ", "TP", "ALB", 
+                     "GLOB", "ALT", "AST", "ALP", "GGTγ", "CHE", "CK", 
+                     "CKMB", "LDH", "TG", "Na", "K", "Cl", "TCO2", "GLU", 
+                     "UREA", "CREA", "OSM", "UA", "Ca", "NLR", "PLR", "MLR", 
+                     "SII", "SIRI", "MESS")  # 指定连续变量
+categorical_vars <- c("Gender", "Smoking", "Drinking", "Hypertension", 
+                      "Diabetes", "Stroke", "Injury_Cause", "Injury_Side", 
+                      "Injured_Arteries", "Limb_Ischemia", "ASA_Class", 
+                      "Collateral_Circulation", "Injury_Energy", 
+                      "Fracture_or_Dislocation", "Multiple_Fractures", 
+                      "Blister", "Crush_Injury", "Degloving_or_Open_Injury", 
+                      "Nerve_injury", "Venous_Injury", "LEDVT", "Shock")
+
+# 定义函数：生成统计特征和单变量分析结果
+generate_stats_table <- function(data, group_var, continuous_vars, categorical_vars) {
+  
+  # 初始化结果数据框
+  result_imputed5 <- data.frame(Variable = character(),
+                                Type = character(),
+                                Total_Summary = character(),
+                                FT_Summary = character(),
+                                NFT_Summary = character(),
+                                P_Value = numeric(),
+                                stringsAsFactors = FALSE)
+  
+  # 处理连续变量
+  continuous_results <- map_df(continuous_vars, function(var) {
+    # 正态性检验
+    shapiro_p <- shapiro.test(data[[var]])$p.value
+    
+    # 总体统计量
+    total_mean <- mean(data[[var]], na.rm = TRUE)
+    total_sd <- sd(data[[var]], na.rm = TRUE)
+    total_median <- median(data[[var]], na.rm = TRUE)
+    total_iqr <- IQR(data[[var]], na.rm = TRUE)
+    
+    # 分组统计量
+    group_stats <- data %>%
+      group_by(!!sym(group_var)) %>%
+      summarise(
+        Mean = mean(!!sym(var), na.rm = TRUE),
+        SD = sd(!!sym(var), na.rm = TRUE),
+        Median = median(!!sym(var), na.rm = TRUE),
+        IQR = IQR(!!sym(var), na.rm = TRUE),
+        .groups = 'drop')
+    
+    # 统计检验
+    if (shapiro_p > 0.05) {
+      test <- t.test(as.formula(paste(var, "~", group_var)), data = data)
+      method <- "t-test"
+    } else {
+      test <- wilcox.test(as.formula(paste(var, "~", group_var)), data = data)
+      method <- "Mann-Whitney"}
+    
+    # 整理结果
+    data.frame(
+      Variable = var,
+      Type = "Continuous",
+      Total_Summary = sprintf("%.1f ± %.1f / %.1f [%.1f-%.1f]", 
+                              total_mean, total_sd, total_median, 
+                              total_median - total_iqr/2, total_median + total_iqr/2),
+      FT_Summary = sprintf("%.1f ± %.1f / %.1f [%.1f-%.1f]", 
+                           group_stats$Mean[1], group_stats$SD[1], 
+                           group_stats$Median[1], 
+                           group_stats$Median[1] - group_stats$IQR[1]/2,
+                           group_stats$Median[1] + group_stats$IQR[1]/2),
+      NFT_Summary = sprintf("%.1f ± %.1f / %.1f [%.1f-%.1f]", 
+                            group_stats$Mean[2], group_stats$SD[2], 
+                            group_stats$Median[2], 
+                            group_stats$Median[2] - group_stats$IQR[2]/2,
+                            group_stats$Median[2] + group_stats$IQR[2]/2),
+      P_Value = test$p.value,
+      Method = method,
+      stringsAsFactors = FALSE)})
+  
+  # 处理分类变量
+  categorical_results <- map_df(categorical_vars, function(var) {
+    # 总体统计
+    total_tab <- table(data[[var]])
+    total_prop <- prop.table(total_tab) * 100
+    
+    # 分组统计
+    group_tab <- table(data[[var]], data[[group_var]])
+    group_prop <- prop.table(group_tab, margin = 2) * 100
+    
+    # 统计检验
+    if (any(group_tab < 5)) {
+      test <- fisher.test(group_tab)
+      method <- "Fisher's exact"
+    } else {
+      test <- chisq.test(group_tab)
+      method <- "Chi-square"}
+    
+    # 整理结果
+    data.frame(
+      Variable = var,
+      Type = "Categorical",
+      Total_Summary = paste(paste0(names(total_tab), ": ", total_tab, " (", round(total_prop, 1), "%)"), collapse = "; "),
+      FT_Summary = paste(paste0(rownames(group_tab), ": ", group_tab[,1], " (", round(group_prop[,1], 1), "%)"), collapse = "; "),
+      NFT_Summary = paste(paste0(rownames(group_tab), ": ", group_tab[,2], " (", round(group_prop[,2], 1), "%)"), collapse = "; "),
+      P_Value = test$p.value,
+      Method = method,
+      stringsAsFactors = FALSE)})
+  
+  # 合并结果
+  bind_rows(continuous_results, categorical_results) %>%
+    mutate(P_Value = round(P_Value, 4),
+           P_Value = ifelse(P_Value < 0.001, "<0.001", as.character(P_Value))) %>%
+    select(Variable, Type, Total_Summary, FT_Summary, NFT_Summary, P_Value, Method)}
+
+# 使用示例
+final_table <- generate_stats_table(
+  data = imputed5,
+  group_var = "Fasciotomy",  # 确保分组变量是二分类因子
+  continuous_vars = continuous_vars,
+  categorical_vars = categorical_vars)
+
+# 查看前6行结果
+head(final_table)
+
+# 保存结果
+write.csv(final_table, "statistical_summary.csv", row.names = FALSE)
+
+
+
+# ----------------------数据预处理----------------------
+# 1.1 统一处理分类变量因子转换
+
+# 加载必要的包
+library(tidyverse)
+library(dplyr)
+
+# 定义需要转为因子的变量（仅无序且多分类的变量）
+factor_vars <- c("Injury_Cause")
+
+# 定义二分类变量（保持数值型）
+binary_vars <- c("Gender", "Smoking", "Drinking", "Hypertension", "Diabetes", "Stroke", 
+                 "Injury_Side", "Fracture_or_Dislocation", "Multiple_Fractures", "Blister", 
+                 "Crush_Injury", "Degloving_or_Open_Injury", "Nerve_injury", 
+                 "Venous_Injury", "LEDVT", "Collateral_Circulation", "Fasciotomy")
+
+# 定义有序变量（保持数值型）
+ordered_vars <- c("Limb_Ischemia", "Injury_Energy", "Shock", "ASA_Class")
+
+# 数据处理
+imputed5 <- imputed5 %>%
+  # 将无序多分类变量转为因子
+  mutate(across(all_of(factor_vars), as.factor)) %>%
+  # 确保二分类变量为数值型（若原始为字符型，则需先转为0/1）
+  mutate(across(all_of(binary_vars), as.numeric)) %>%
+  # 将有序变量转为数值型（若需要保留顺序信息）
+  mutate(across(all_of(ordered_vars), as.numeric))
+
+# 检查转换结果
+str(imputed5)
+
+# 1.2 检查缺失值和异常值
+# 安装并加载skimr包
+if (!require(skimr)) install.packages("skimr")
+library(skimr)
+
+# 检查数据摘要，包括缺失值和统计信息
+skim(imputed5)
+
+# ----------------------特征筛选----------------------
+# LASSO回归
+# 加载必要包
+library(glmnet)    # LASSO回归
+install.packages("pROC")
+library(pROC)      # ROC曲线分析
+library(ggplot2)   # 数据可视化
+
+# 假设Fasciotomy是二分类因变量，创建设计矩阵
+X <- model.matrix(~ . - Patient_ID - 1,  # 移除截距项和Patient_ID
+                  data = imputed5[, !colnames(imputed5) %in% "Fasciotomy"])
+y <- imputed5$Fasciotomy
+X_filtered <- X[, apply(X, 2, var) > 0]
+X_scaled <- scale(X_filtered)
+
+# 拟合LASSO模型
+set.seed(123)
+lasso_model <- cv.glmnet(X_scaled, y, family = "binomial",
+                         alpha = 1, nfolds = 10,
+                         type.measure = "deviance")
+
+# 选择最优lambda（标准误差范围内最简洁模型）
+lambda_opt <- lasso_model$lambda.1se
+
+# 提取非零系数变量
+selected_vars <- coef(lasso_model, s = "lambda.1se") %>%
+  as.matrix() %>%
+  .[which(. != 0), ] %>%
+  names() %>%
+  setdiff("(Intercept)")  # 去除截距项
+
+# 输出选择的变量
+print("LASSO选择的变量:")
+print(selected_vars)
+
+# Bootstrap验证变量选择频率
+boot_selected_vars <- replicate(100, {
+  sample_idx <- sample(nrow(X), replace = TRUE)
+  fit <- glmnet(X[sample_idx, ], y[sample_idx], alpha = 1)
+  selected_coef <- coef(fit, s = lasso_model$lambda.min)
+  selected_vars <- rownames(selected_coef)[which(selected_coef != 0)]
+  selected_vars[selected_vars != "(Intercept)"]  # 排除截距项
+})
+
+var_freq <- table(unlist(boot_selected_vars))
+print(sort(var_freq, decreasing = TRUE))
+
+# 绘制Lasso正则化路径图
+# 设置图形参数（边距、字体大小等）
+par(mar = c(5, 5, 5, 2) + 0.1, #调整图形边距（下、左、上、右）
+    mgp = c(3, 1, 0), #调整坐标轴标签位置（标题、刻度标签、刻度线距离边界的距离）
+    cex.lab = 1.2, #坐标轴标签字体缩放倍数
+    cex.axis = 1.1) #坐标轴刻度字体缩放倍数
+plot(lasso_model$glmnet.fit, 
+     xvar = "lambda", 
+     label = FALSE)
+abline(v = log(lambda_opt), col = "#CC0000", lty = 2)  # 标注最优lambda值
+# 绘制交叉验证均方误差图
+plot(lasso_model)
+abline(v = log(lambda_opt), col = "#CC0000", lty = 2)  # 标注最优lambda值
+
+# EPV约束：最多选择4个变量
+if (length(selected_vars) > 4) {
+  # 按系数绝对值排序
+  coef_values <- coef(lasso_model, s = "lambda.1se")[selected_vars, ] %>% abs()
+  final_vars <- names(sort(coef_values, decreasing = TRUE))[1:4]
+} else {final_vars <- selected_vars}
+
+# ----------------------多变量逻辑回归----------------------
+# 生成交互项
+imputed5$K_CK_interaction <- imputed5$K * imputed5$CK
+imputed5$Limb_Ischemia_NEU_interaction <- imputed5$Limb_Ischemia * imputed5$NEU
+imputed5$K_Limb_Ischemia_interaction <- imputed5$K * imputed5$Limb_Ischemia
+
+formula <- Fasciotomy ~ Limb_Ischemia + K + CK + NEU + K_CK_interaction + Limb_Ischemia_NEU_interaction + K_Limb_Ischemia_interaction
+final_model <- glm(formula, data = imputed5, family = binomial)
+summary(final_model)
+
+# 结果输出与评估
+# 回归系数与OR值
+results <- data.frame(
+  Variable = names(coef(final_model)),
+  Coef = coef(final_model),
+  OR = exp(coef(final_model)),
+  p_value = summary(final_model)$coefficients[,4])
+
+# 计算95%置信区间（对数几率）
+ci <- confint(final_model)
+
+# 将对数几率的CI转换为OR的CI
+results$Lower_OR_CI <- exp(ci[,1])  # 下限取指数
+results$Upper_OR_CI <- exp(ci[,2])  # 上限取指数
+
+# 打印结果
+print(results)
+
+# 检验非线性
+library(rms)
+dd <- datadist(imputed5)
+options(datadist = "dd")
+model_rcs <- lrm(Fasciotomy ~ Limb_Ischemia + rcs(K, 3) + rcs(CK, 3) + rcs(NEU, 3), data = imputed5)
+anova(model_rcs)  # 检验非线性项显著性
+
+final_formula <- Fasciotomy ~ Limb_Ischemia + K + CK + rcs(NEU, 3)
+final_model_optimized <- lrm(final_formula, 
+                             data = imputed5,
+                             x=TRUE,y=TRUE)
+anova(final_model_optimized)
+
+library(ggplot2)
+
+# 生成预测对象
+pred_NEU <- Predict(final_model_optimized, NEU, fun = plogis)
+# 生成预测数据框
+pred_data <- data.frame(
+  NEU = pred_NEU$NEU,
+  Prob = pred_NEU$yhat,
+  Lower = pred_NEU$lower,
+  Upper = pred_NEU$upper)
+
+# 绘制曲线
+ggplot(pred_data, aes(x = NEU, y = Prob)) +
+  geom_line(color = "#CC0000", linewidth = 1) +  # 使用size=1兼容旧版本ggplot2
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), alpha = 0.2, fill = "#CC0000") +
+  labs(
+    x = "Neutrophil Count (NEU, 10^9/L)",
+    y = "Predicted Probability of Fasciotomy"
+  ) +
+  theme_minimal()
+
+# ----------------------绘制列线图----------------------
+# 加载包
+install.packages("rms")
+library(rms)
+
+# 绘制列线图
+nom1 <- nomogram(final_model_optimized,
+                 fun = plogis,
+                 lp = F,
+                 fun.at = c(0.1, 0.3, 0.5, 0.7, 0.9, 0.99),
+                 funlabel = "Risk for Fasciotomy")
+plot(nom1)
+
+# 列线图性能评价
+# 预测概率
+pred_prob <- predict(final_model_optimized, type = "fitted")
+summary(pred_prob)
+hist(pred_prob, breaks = 50, main = "Predict probability distribution", xlab = "Predict probability")
+
+# 事件发生率
+event_rate <- mean(imputed5$Fasciotomy)
+cat("事件发生率:", round(event_rate, 3))
+
+# AUC值
+library(pROC)
+roc_obj <- roc(imputed5$Fasciotomy, predict(final_model_optimized, type = "fitted"))
+auc_value <- auc(roc_obj)
+cat("模型AUC:", round(auc_value, 3))
+
+# ----------------------绘制DCA曲线----------------------
+library(rmda)
+library(dplyr)
+library(rmda)
+
+# 生成决策曲线
+model_dca <- decision_curve(
+  final_formula, 
+  data = imputed5,
+  thresholds = seq(0, 1, by = 0.01),
+  family = binomial(link = 'logit'),
+  study.design = 'case-control',
+  population.prevalence = event_rate)
+
+# 绘制决策曲线图
+plot_decision_curve(model_dca, 
+                    curve.names = c('Nomogram'), 
+                    xlim = c(0, 1.0),
+                    cost.benefit.axis = FALSE, 
+                    col = c('#CC0000'),
+                    confidence.intervals = FALSE, 
+                    standardize = FALSE)
+
+# 绘制临床影响曲线图
+plot_clinical_impact(model_dca, 
+                     population.size = 1000, 
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8, 
+                     col = c('#CC0000', '#0000FF'),
+                     confidence.intervals = FALSE)
+
+# 调整决策曲线
+model_dca <- decision_curve(
+  final_formula, 
+  data = imputed5,
+  thresholds = seq(0, 0.5, by = 0.01),
+  family = binomial(link = 'logit'),
+  study.design = 'case-control',
+  population.prevalence = event_rate)
+
+# 提取决策曲线数据
+dca_data <- model_dca$derived.data
+
+# 提取最佳阈值
+best_threshold <- model_dca$derived.data %>% 
+  filter(NB == max(NB, na.rm = TRUE)) %>% 
+  pull(thresholds)
+cat("最佳风险阈值:", best_threshold)
+
+# 计算与 All 的交点
+intersect_all <- dca_data %>% 
+  filter(abs(NB - rho) == min(abs(NB - rho))) %>% 
+  pull(thresholds)
+
+# 计算与 None 的交点
+intersect_none <- dca_data %>% 
+  filter(abs(NB - 0) == min(abs(NB - 0))) %>% 
+  pull(thresholds)
+
+# 输出交点
+cat("列线图与 All 的交点阈值:", intersect_all, "\n")
+cat("列线图与 None 的交点阈值:", intersect_none, "\n")
+
+# 标注与 All 的交点
+abline(v = intersect_all, col = "blue", lty = 2)
+text(x = intersect_all, y = max(dca_data$NB), 
+     labels = paste("All:", round(intersect_all, 3)), 
+     pos = 4, col = "blue")
+
+# 标注与 None 的交点
+abline(v = intersect_none, col = "green", lty = 2)
+text(x = intersect_none, y = max(dca_data$NB), 
+     labels = paste("None:", round(intersect_none, 3)), 
+     pos = 4, col = "green")
+
+# ----------------------ROC曲线----------------------
+library(pROC)
+
+###计算C指数
+imputed5$predvalue<-predict(final_model_optimized)
+modelROC <- roc(imputed5$Fasciotomy, imputed5$predvalue)
+auc(modelROC)
+ci(auc(modelROC))
+c_index <- final_model_optimized$stats["C"]
+cat("C-index:", round(c_index, 5), "\n")
+
+###绘制ROC曲线
+plot(modelROC,
+     col = "#CC0000",          # 曲线颜色
+     print.thres = TRUE,       # 显示最佳截断值
+     print.thres.pch = 19,     # 最佳阈值标记形状
+     print.thres.col = "black",# 最佳阈值标记颜色
+     lwd = 2,                  # 曲线线宽
+     xlab = "1 - Specificity", # 横轴标签
+     ylab = "Sensitivity",
+     legacy.axes = TRUE)     # 纵轴标签
+legend(0.55,0.25,
+       c("AUC:0.877
+(95%CI:0.819-0.934)"),
+       lty = c(1),
+       lwd = c(2),
+       col = c("#CC0000"),
+       bty = "n")#"n"为不加边框
+
+# ----------------------校准曲线----------------------
+cal1<-calibrate(final_model_optimized, method = "boot", B=1000)   #自抽样法的拟合曲线
+plot(cal1,
+     xlim = c(0,1),
+     xlab = "Prediced Probability",
+     ylab = "Observed Probability",
+     main = "Calibration Curve (Bootstrap-resampling)",
+     legend = F,
+     subtitles = T)
+abline(0,1, col="black",lty=2,lwd=1)
+lines(cal1[, c("predy", "calibrated.orig")], type = "l", lwd=1, col="#CC0000",pch=16)
+lines(cal1[, c("predy", "calibrated.corrected")], type = "l", lwd=1, col="#0000FF",pch=16)
+legend(0.55,0.35,
+       c("Ideal","Apparent","Bias-corrected"),
+       lty = c(2,1,1),
+       lwd = c(1,1,1),
+       col = c("black","#CC0000","#0000FF"),
+       bty = "n")  #"o"为加边框
+
+# Hosmer-Lemeshow检验
+library(ResourceSelection)
+library(ggplot2)
+# 获取预测概率
+pred_prob <- predict(final_model_optimized, type = "fitted")
+# 执行Hosmer-Lemeshow检验（分组数g=10）
+hoslem_test <- hoslem.test(imputed5$Fasciotomy, pred_prob, g = 10)
+print("Hosmer-Lemeshow检验结果:")
+print(hoslem_test)
+
+actual_outcomes <- imputed5$Fasciotomy  # 实际二分类结果（0/1）
+
+# 将预测概率按分位数分成10组（与HL检验分组一致）
+groups <- cut(pred_prob, 
+              breaks = quantile(pred_prob, probs = seq(0, 1, 0.1)), 
+              include.lowest = TRUE)
+
+# 计算每组的平均预测概率和实际发生率
+calibration_data <- data.frame(
+  predicted = tapply(pred_prob, groups, mean),  # 组内平均预测概率
+  observed = tapply(actual_outcomes, groups, mean)    # 组内实际发生率
+)
+
+# 添加每组的样本量（可选）
+calibration_data$size <- tapply(actual_outcomes, groups, length)
+
+# 绘制校准曲线
+plot(calibration_data$predicted, calibration_data$observed,
+     xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "Predicted Probability",
+     ylab = "Observed Probability",
+     main = "Calibration Curve (Hosmer-Lemeshow)",
+     col = "#CC0000", pch = 16, cex = 1.2)
+
+# 添加理想校准线（45度虚线）
+abline(0, 1, col = "black", lty = 2, lwd = 1)
+
+# 添加非参数拟合曲线（如LOESS平滑线）
+loess_fit <- loess(observed ~ predicted, data = calibration_data)
+pred_grid <- seq(0, 1, length.out = 100)
+lines(pred_grid, predict(loess_fit, newdata = data.frame(predicted = pred_grid)),
+      col = "#0000FF", lwd = 1)
+
+# 添加图例
+legend(0.5, 0.3,
+       legend = c("Ideal", "Observed (HL Groups)", "Smoothed Trend"),
+       col = c("black", "#CC0000", "#0000FF"),
+       lty = c(2, NA, 1),
+       pch = c(NA, 16, NA),
+       lwd = c(1, NA, 2),
+       bty = "n")
+
+# 添加HL检验统计量到副标题
+mtext(paste0("Hosmer-Lemeshow χ² = ", round(hoslem_test$statistic, 2),
+             ", p = ", round(hoslem_test$p.value, 3)),
+      side = 3, line = 0.5, cex = 0.8)
+
+# ----------------------10折交叉验证----------------------
+# 加载所需包
+library(caret)
+library(pROC)
+# 检查当前因子水平
+str(imputed5$Fasciotomy)
+
+# 重新定义因子水平，使用合法名称
+imputed5$Fasciotomy <- factor(imputed5$Fasciotomy, levels = c(0, 1), labels = c("NFT.Group", "FT.Group"))
+# 设置10折交叉验证，启用AUC
+train_control <- trainControl(
+  method = "cv",          # 10折交叉验证
+  number = 10,
+  classProbs = TRUE,      # 计算类概率
+  summaryFunction = twoClassSummary  # 使用ROC、敏感度和特异度作为评估指标
+)
+# 训练逻辑回归模型
+cv_model <- train(
+  final_formula, 
+  data = imputed5, 
+  method = "glm", 
+  family = "binomial", 
+  trControl = train_control,
+  metric = "ROC"  # 以AUC（ROC）作为优化指标
+)
+
+# 查看交叉验证结果
+print("交叉验证结果:")
+print(cv_model)
+
+# ----------------------Bootstrap内部验证----------------------
+library(boot)
+library(logistf)  # 用于处理完全分离问题的Firth回归
+library(pROC)
+
+# 移除无关变量（如Patient_ID），确保数据清洁
+imputed5_clean <- imputed5[, !colnames(imputed5) %in% c("Patient_ID", "K_CK_interaction", "Limb_Ischemia_NEU_interaction", "K_Limb_Ischemia_interaction")]
+
+boot_auc <- function(data, indices) {
+  d_train <- data[indices, ]
+  d_test <- data[-unique(indices), ]
+  
+  # 检查测试集是否为空或单一类别
+  if (nrow(d_test) == 0) {
+    cat("Empty test set detected.\n")
+    return(NA)
+  }
+  if (length(unique(d_test$Fasciotomy)) < 2) {
+    cat("Single class in test set detected.\n")
+    return(NA)
+  }
+  
+  # 确保因子变量水平一致性
+  factor_vars <- sapply(d_train, is.factor)
+  for (var in names(factor_vars)[factor_vars]) {
+    levels(d_test[[var]]) <- levels(d_train[[var]])
+  }
+  
+  # 使用Firth回归
+  model <- logistf(final_formula, data = d_train)
+  
+  # 检查模型是否收敛
+  if (is.null(model$coefficients)) {
+    cat("Model failed to converge.\n")
+    return(NA)
+  }
+  
+  # 生成预测概率
+  pred_prob <- predict(model, newdata = d_test, type = "response")
+  
+  # 计算AUC
+  roc_obj <- suppressMessages(roc(d_test$Fasciotomy, pred_prob, quiet = TRUE))
+  return(auc(roc_obj))
+}
+# 计算初始模型AUC
+initial_model <- logistf(final_formula, data = imputed5_clean)
+initial_pred_prob <- predict(initial_model, type = "response")
+initial_auc <- auc(roc(imputed5_clean$Fasciotomy, initial_pred_prob, quiet = TRUE))
+
+# 执行Bootstrap
+set.seed(123)
+boot_results <- boot(data = imputed5_clean, 
+                     statistic = boot_auc, 
+                     R = 1000,
+                     parallel = "multicore", 
+                     ncpus = 4,
+                     sim = "ordinary", 
+                     stype = "i",
+                     strata = imputed5_clean$Fasciotomy)
+
+# 手动设置初始值
+boot_results$t0 <- initial_auc
+
+# 过滤无效迭代
+valid_auc <- boot_results$t[!is.na(boot_results$t)]
+cat("Valid Bootstrap iterations:", length(valid_auc), "\n")
+
+# 计算均值和置信区间
+mean_auc <- mean(valid_auc)
+boot_ci <- quantile(valid_auc, c(0.025, 0.975))
+cat("Bootstrap AUC (95% CI):", 
+    round(mean_auc, 3), 
+    "[", round(boot_ci[1], 3), "-", 
+    round(boot_ci[2], 3), "]\n")
+
+# 绘制分布图
+hist(valid_auc, breaks = 30, 
+     main = "Bootstrap AUC Distribution", 
+     xlab = "AUC", 
+     col = "#CC0000", 
+     border = "white")
+abline(v = mean_auc, col = "black", lty = 2, lwd = 2)
